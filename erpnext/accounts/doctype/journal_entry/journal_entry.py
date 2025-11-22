@@ -1005,6 +1005,8 @@ class JournalEntry(AccountsController):
 			self.total_credit, self.precision("total_credit")
 		)
 
+		self.difference = flt(self.difference, self.precision("difference"))
+
 	def validate_multi_currency(self):
 		alternate_currency = []
 		for d in self.get("accounts"):
