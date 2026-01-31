@@ -118,6 +118,44 @@ class JournalEntry(AccountsController):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 
+def before_validate(doc, method):
+    # Precision tolerance (e.g., 0.02 to be safe against double rounding)
+    tolerance = 0.05
+    
+    total_debit = 0.0
+    total_credit = 0.0
+    
+    # 1. Sum up the Base Currency (Company Currency) fields
+    for row in doc.accounts:
+        total_debit += flt(row.debit)
+        total_credit += flt(row.credit)
+        
+    # 2. Calculate difference
+    diff = total_debit - total_credit
+    
+    # 3. If difference is tiny but not zero, fix it
+    if 0 < abs(diff) <= tolerance:
+        # We need to find a suitable row to plug the difference.
+        # Ideally, pick the largest row or the first row.
+        # Here we pick the first row for simplicity.
+        target_row = doc.accounts[0]
+        
+        if diff > 0:
+            # Debits are higher. We need to reduce Debit OR increase Credit on this row.
+            # Strategy: Add to Credit if possible, else reduce Debit.
+            if target_row.credit > 0:
+                target_row.credit += diff
+            else:
+                target_row.debit -= diff
+        else:
+            # Credits are higher (diff is negative). We need to reduce Credit OR increase Debit.
+            if target_row.debit > 0:
+                target_row.debit += abs(diff)
+            else:
+                target_row.credit -= abs(diff)
+                
+        frappe.msgprint(f"Auto-corrected floating point precision error of {diff}")
+
 	def validate(self):
 		if self.voucher_type == "Opening Entry":
 			self.is_opening = "Yes"
