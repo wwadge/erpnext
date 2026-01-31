@@ -2,8 +2,6 @@
 # For license information, please see license.txt
 
 
-from datetime import datetime
-
 import frappe
 from frappe import qb
 from frappe.query_builder.functions import Sum
@@ -16,7 +14,10 @@ from erpnext.accounts.doctype.payment_entry.test_payment_entry import create_pay
 from erpnext.accounts.doctype.purchase_invoice.test_purchase_invoice import make_purchase_invoice
 from erpnext.accounts.doctype.sales_invoice.test_sales_invoice import create_sales_invoice
 from erpnext.accounts.party import get_party_account
-from erpnext.buying.doctype.purchase_order.test_purchase_order import prepare_data_for_internal_transfer
+from erpnext.buying.doctype.purchase_order.test_purchase_order import (
+	create_purchase_order,
+	prepare_data_for_internal_transfer,
+)
 from erpnext.projects.doctype.project.test_project import make_project
 from erpnext.stock.doctype.item.test_item import create_item
 
@@ -2432,3 +2433,66 @@ class TestAccountsController(IntegrationTestCase):
 
 		# Second return should only get remaining discount (100 - 60 = 40)
 		self.assertEqual(return_si_2.discount_amount, -40)
+
+	def test_company_linked_address(self):
+		from erpnext.crm.doctype.prospect.test_prospect import make_address
+		from erpnext.selling.doctype.sales_order.test_sales_order import make_sales_order
+
+		company_address = make_address(
+			address_title="Company", address_type="Shipping", address_line1="100", city="Mumbai"
+		)
+		company_address.append("links", {"link_doctype": "Company", "link_name": "_Test Company"})
+		company_address.save()
+
+		customer_shipping = make_address(
+			address_title="Customer", address_type="Shipping", address_line1="10"
+		)
+		customer_shipping.append("links", {"link_doctype": "Customer", "link_name": "_Test Customer"})
+		customer_shipping.save()
+
+		supplier_billing = make_address(address_title="Supplier", address_line1="2", city="Ahmedabad")
+		supplier_billing.append("links", {"link_doctype": "Supplier", "link_name": "_Test Supplier"})
+		supplier_billing.save()
+
+		po = create_purchase_order(do_not_save=True)
+		po.shipping_address = customer_shipping.name
+		self.assertRaises(frappe.ValidationError, po.save)
+		po.shipping_address = company_address.name
+		po.save()
+
+		po.billing_address = supplier_billing.name
+		self.assertRaises(frappe.ValidationError, po.save)
+		po.billing_address = company_address.name
+		po.reload()
+		po.save()
+
+		si = make_sales_order(do_not_save=1, do_not_submit=1)
+		si.dispatch_address_name = supplier_billing.name
+		self.assertRaises(frappe.ValidationError, si.save)
+		si.items[0].delivered_by_supplier = 1
+		si.items[0].supplier = "_Test Supplier"
+		si.save()
+
+		po = create_purchase_order(do_not_save=True)
+		po.shipping_address = customer_shipping.name
+		self.assertRaises(frappe.ValidationError, po.save)
+		po.items[0].delivered_by_supplier = 1
+		po.save()
+
+	@IntegrationTestCase.change_settings("Global Defaults", {"use_posting_datetime_for_naming_documents": 1})
+	def test_document_naming_rule_based_on_posting_date(self):
+		frappe.new_doc(
+			"Document Naming Rule", document_type="Sales Invoice", prefix="SI-.MM.-.YYYY.-"
+		).submit()
+
+		si = create_sales_invoice(do_not_save=True)
+		si.set_posting_time = 1
+		si.posting_date = "2025-12-31"
+		si.save()
+		self.assertEqual(si.name, "SI-12-2025-00001")
+
+		si = create_sales_invoice(do_not_save=True)
+		si.set_posting_time = 1
+		si.posting_date = "2026-01-01"
+		si.save()
+		self.assertEqual(si.name, "SI-01-2026-00002")

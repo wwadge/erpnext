@@ -8,7 +8,7 @@ app_email = "hello@frappe.io"
 app_license = "GNU General Public License (v3)"
 source_link = "https://github.com/frappe/erpnext"
 app_logo_url = "/assets/erpnext/images/erpnext-logo.svg"
-app_home = "/app/home"
+app_home = "/desk"
 
 add_to_apps_screen = [
 	{
@@ -20,7 +20,7 @@ add_to_apps_screen = [
 	}
 ]
 
-develop_version = "15.x.x-develop"
+develop_version = "17.x.x-develop"
 
 app_include_js = "erpnext.bundle.js"
 app_include_css = "erpnext.bundle.css"
@@ -146,6 +146,14 @@ website_route_rules = [
 		},
 	},
 	{"from_route": "/purchase-orders", "to_route": "Purchase Order"},
+	{
+		"from_route": "/purchase-orders/<path:name>",
+		"to_route": "order",
+		"defaults": {
+			"doctype": "Purchase Order",
+			"parents": [{"label": "Purchase Order", "route": "purchase-orders"}],
+		},
+	},
 	{
 		"from_route": "/purchase-orders/<path:name>",
 		"to_route": "order",
@@ -394,9 +402,10 @@ doc_events = {
 }
 
 # function should expect the variable and doc as arguments
+naming_series_variables_list = ["FY", "TFY", "ABBR", "MM", "DD", "YY", "YYYY", "JJJ", "WW"]
 naming_series_variables = {
-	"FY": "erpnext.accounts.utils.parse_naming_series_variable",
-	"ABBR": "erpnext.accounts.utils.parse_naming_series_variable",
+	variable: "erpnext.accounts.utils.parse_naming_series_variable"
+	for variable in naming_series_variables_list
 }
 
 # On cancel event Payment Entry will be exempted and all linked submittable doctype will get cancelled.
@@ -411,7 +420,9 @@ scheduler_events = {
 		"0/15 * * * *": [
 			"erpnext.manufacturing.doctype.bom_update_log.bom_update_log.resume_bom_cost_update_jobs",
 		],
-		"0/30 * * * *": [],
+		"0/30 * * * *": [
+			"erpnext.stock.doctype.repost_item_valuation.repost_item_valuation.run_parallel_reposting",
+		],
 		# Hourly but offset by 30 minutes
 		"30 * * * *": [
 			"erpnext.accounts.doctype.gl_entry.gl_entry.rename_gle_sle_docs",
@@ -559,6 +570,7 @@ accounting_dimension_doctypes = [
 	"Payment Request",
 	"Asset Movement Item",
 	"Asset Depreciation Schedule",
+	"Advance Taxes and Charges",
 ]
 
 get_matching_queries = (
@@ -646,6 +658,10 @@ global_search_doctypes = {
 		{"doctype": "Warranty Claim", "index": 47},
 	],
 }
+
+ignore_links_on_delete = [
+	"Tax Withholding Entry",
+]
 
 additional_timeline_content = {"*": ["erpnext.telephony.doctype.call_log.call_log.get_linked_call_logs"]}
 

@@ -9,7 +9,6 @@ from collections import defaultdict
 import frappe
 from frappe import _, msgprint
 from frappe.model.document import Document
-from frappe.model.mapper import get_mapped_doc
 from frappe.query_builder import Case
 from frappe.query_builder.functions import IfNull, Sum
 from frappe.utils import (
@@ -118,6 +117,9 @@ class ProductionPlan(Document):
 			"enable_stock_reservation",
 			frappe.db.get_single_value("Stock Settings", "enable_stock_reservation"),
 		)
+
+	def on_discard(self):
+		self.db_set("status", "Cancelled")
 
 	def validate(self):
 		self.set_pending_qty_in_row_without_reference()
@@ -352,7 +354,7 @@ class ProductionPlan(Document):
 				so_item.parent,
 				so_item.item_code,
 				so_item.warehouse,
-				so_item.qty,
+				(so_item.stock_qty - so_item.stock_reserved_qty).as_("qty"),
 				so_item.work_order_qty,
 				so_item.delivered_qty,
 				so_item.conversion_factor,
@@ -364,7 +366,7 @@ class ProductionPlan(Document):
 			.where(
 				(so_item.parent.isin(so_list))
 				& (so_item.docstatus == 1)
-				& (so_item.qty > so_item.work_order_qty)
+				& ((so_item.stock_qty - so_item.stock_reserved_qty) > so_item.work_order_qty)
 			)
 		)
 
@@ -385,6 +387,15 @@ class ProductionPlan(Document):
 
 		pi = frappe.qb.DocType("Packed Item")
 
+		pending_qty = (
+			frappe.qb.terms.Case()
+			.when(
+				(so_item.work_order_qty > so_item.delivered_qty),
+				(((so_item.qty - so_item.work_order_qty) * pi.qty) / so_item.qty),
+			)
+			.else_(((so_item.qty - so_item.delivered_qty) * pi.qty) / so_item.qty)
+		)
+
 		packed_items_query = (
 			frappe.qb.from_(so_item)
 			.from_(pi)
@@ -392,7 +403,7 @@ class ProductionPlan(Document):
 				pi.parent,
 				pi.item_code,
 				pi.warehouse.as_("warehouse"),
-				(((so_item.qty - so_item.work_order_qty) * pi.qty) / so_item.qty).as_("pending_qty"),
+				pending_qty.as_("pending_qty"),
 				pi.parent_item,
 				pi.description,
 				so_item.name,
@@ -403,7 +414,16 @@ class ProductionPlan(Document):
 				& (so_item.docstatus == 1)
 				& (pi.parent_item == so_item.item_code)
 				& (so_item.parent.isin(so_list))
-				& (so_item.qty > so_item.work_order_qty)
+				& (
+					(
+						(so_item.work_order_qty > so_item.delivered_qty)
+						& (so_item.qty > so_item.work_order_qty)
+					)
+					| (
+						(so_item.work_order_qty <= so_item.delivered_qty)
+						& (so_item.qty > so_item.delivered_qty)
+					)
+				)
 				& (
 					ExistsCriterion(
 						frappe.qb.from_(bom)
@@ -726,19 +746,21 @@ class ProductionPlan(Document):
 				"project": self.project,
 			}
 
-			key = (d.item_code, d.sales_order, d.sales_order_item, d.warehouse)
+			key = (d.item_code, d.sales_order, d.sales_order_item, d.warehouse, d.planned_start_date)
 			if self.combine_items:
-				key = (d.item_code, d.sales_order, d.warehouse)
+				key = (d.item_code, d.sales_order, d.warehouse, d.planned_start_date)
 
 			if not d.sales_order:
-				key = (d.name, d.item_code, d.warehouse)
+				key = (d.name, d.item_code, d.warehouse, d.planned_start_date)
 
 			if not item_details["project"] and d.sales_order:
 				item_details["project"] = frappe.get_cached_value("Sales Order", d.sales_order, "project")
 
 			if self.get_items_from == "Material Request":
 				item_details.update({"qty": d.planned_qty})
-				item_dict[(d.item_code, d.material_request_item, d.warehouse)] = item_details
+				item_dict[
+					(d.item_code, d.material_request_item, d.warehouse, d.planned_start_date)
+				] = item_details
 			else:
 				item_details.update(
 					{
@@ -1408,14 +1430,21 @@ def get_material_request_items(
 	include_safety_stock,
 	warehouse,
 	bin_dict,
-	total_qty,
+	consumed_qty,
 ):
 	required_qty = 0
+	item_code = row.get("item_code")
+
 	if not ignore_existing_ordered_qty or bin_dict.get("projected_qty", 0) < 0:
-		required_qty = total_qty[row.get("item_code")]
-	elif total_qty[row.get("item_code")] > bin_dict.get("projected_qty", 0):
-		required_qty = total_qty[row.get("item_code")] - bin_dict.get("projected_qty", 0)
-		total_qty[row.get("item_code")] -= required_qty
+		required_qty = flt(row.get("qty"))
+	else:
+		key = (item_code, warehouse)
+		available_qty = flt(bin_dict.get("projected_qty", 0)) - consumed_qty[key]
+		if available_qty > 0:
+			required_qty = max(0, flt(row.get("qty")) - available_qty)
+			consumed_qty[key] += min(flt(row.get("qty")), available_qty)
+		else:
+			required_qty = flt(row.get("qty"))
 
 	if doc.get("consider_minimum_order_qty") and required_qty > 0 and required_qty < row["min_order_qty"]:
 		required_qty = row["min_order_qty"]
@@ -1661,23 +1690,6 @@ def get_items_for_material_requests(doc, warehouses=None, get_parent_warehouse_d
 			] += d.get("qty")
 		sub_assembly_items = {k[:2]: v for k, v in sub_assembly_items.items()}
 
-		data = []
-		for row in doc.get("po_items"):
-			get_sub_assembly_items(
-				[],
-				frappe._dict(),
-				row.get("bom_no"),
-				data,
-				row.get("planned_qty"),
-				doc.get("company"),
-				warehouse=doc.get("sub_assembly_warehouse"),
-				skip_available_sub_assembly_item=doc.get("skip_available_sub_assembly_item"),
-				fetch_phantom_items=True,
-			)
-
-		for d in data:
-			sub_assembly_items[(d.get("production_item"), d.get("bom_no"))] += d.get("stock_qty")
-
 	for data in po_items:
 		if not data.get("include_exploded_items") and doc.get("sub_assembly_items"):
 			data["include_exploded_items"] = 1
@@ -1774,11 +1786,12 @@ def get_items_for_material_requests(doc, warehouses=None, get_parent_warehouse_d
 				so_item_details[sales_order][key] = details
 
 	mr_items = []
+	consumed_qty = defaultdict(float)
+
 	for sales_order in so_item_details:
 		item_dict = so_item_details[sales_order]
-		total_qty = defaultdict(float)
 		for details in item_dict.values():
-			total_qty[details.item_code] += flt(details.qty)
+			warehouse = warehouse or details.get("source_warehouse") or details.get("default_warehouse")
 			bin_dict = get_bin_details(details, doc.company, warehouse)
 			bin_dict = bin_dict[0] if bin_dict else {}
 
@@ -1792,7 +1805,7 @@ def get_items_for_material_requests(doc, warehouses=None, get_parent_warehouse_d
 					include_safety_stock,
 					warehouse,
 					bin_dict,
-					total_qty,
+					consumed_qty,
 				)
 				if items:
 					mr_items.append(items)
@@ -1896,9 +1909,8 @@ def get_sub_assembly_items(
 	warehouse=None,
 	indent=0,
 	skip_available_sub_assembly_item=False,
-	fetch_phantom_items=False,
 ):
-	data = get_bom_children(parent=bom_no, return_all=False, fetch_phantom_items=fetch_phantom_items)
+	data = get_bom_children(parent=bom_no)
 	for d in data:
 		if d.expandable:
 			parent_item_code = frappe.get_cached_value("BOM", bom_no, "item")
@@ -1921,31 +1933,32 @@ def get_sub_assembly_items(
 			elif warehouse:
 				bin_details.setdefault(d.item_code, get_bin_details(d, company, for_warehouse=warehouse))
 
-			bom_data.append(
-				frappe._dict(
-					{
-						"actual_qty": bin_details[d.item_code][0].get("actual_qty", 0)
-						if bin_details.get(d.item_code)
-						else 0,
-						"parent_item_code": parent_item_code,
-						"description": d.description,
-						"production_item": d.item_code,
-						"item_name": d.item_name,
-						"stock_uom": d.stock_uom,
-						"uom": d.stock_uom,
-						"bom_no": d.value,
-						"is_sub_contracted_item": d.is_sub_contracted_item,
-						"bom_level": indent,
-						"indent": indent,
-						"stock_qty": stock_qty,
-						"required_qty": required_qty,
-						"projected_qty": bin_details[d.item_code][0].get("projected_qty", 0)
-						if bin_details.get(d.item_code)
-						else 0,
-						"main_bom": bom_no,
-					}
+			if not d.is_phantom_item:
+				bom_data.append(
+					frappe._dict(
+						{
+							"actual_qty": bin_details[d.item_code][0].get("actual_qty", 0)
+							if bin_details.get(d.item_code)
+							else 0,
+							"parent_item_code": parent_item_code,
+							"description": d.description,
+							"production_item": d.item_code,
+							"item_name": d.item_name,
+							"stock_uom": d.stock_uom,
+							"uom": d.stock_uom,
+							"bom_no": d.value,
+							"is_sub_contracted_item": d.is_sub_contracted_item,
+							"bom_level": indent,
+							"indent": indent,
+							"stock_qty": stock_qty,
+							"required_qty": required_qty,
+							"projected_qty": bin_details[d.item_code][0].get("projected_qty", 0)
+							if bin_details.get(d.item_code)
+							else 0,
+							"main_bom": bom_no,
+						}
+					)
 				)
-			)
 
 			if d.value:
 				get_sub_assembly_items(
@@ -1958,7 +1971,6 @@ def get_sub_assembly_items(
 					warehouse,
 					indent=indent + 1,
 					skip_available_sub_assembly_item=skip_available_sub_assembly_item,
-					fetch_phantom_items=fetch_phantom_items,
 				)
 
 
@@ -2016,22 +2028,14 @@ def get_reserved_qty_for_production_plan(item_code, warehouse):
 	return reserved_qty_for_production_plan - reserved_qty_for_production
 
 
-@frappe.request_cache
 def get_non_completed_production_plans():
 	table = frappe.qb.DocType("Production Plan")
-	child = frappe.qb.DocType("Production Plan Item")
 
 	return (
 		frappe.qb.from_(table)
-		.inner_join(child)
-		.on(table.name == child.parent)
 		.select(table.name)
 		.distinct()
-		.where(
-			(table.docstatus == 1)
-			& (table.status.notin(["Completed", "Closed"]))
-			& (child.planned_qty > child.ordered_qty)
-		)
+		.where((table.docstatus == 1) & (table.status.notin(["Completed", "Closed"])))
 	).run(pluck="name")
 
 

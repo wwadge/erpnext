@@ -380,6 +380,9 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 	}
 
 	calculate_taxes() {
+		// reset value from earlier calculations
+		this.grand_total_diff = 0;
+
 		const doc = this.frm.doc;
 		if (!doc.taxes?.length) return;
 
@@ -617,6 +620,8 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 
 				if (diff && Math.abs(diff) <= 5.0 / Math.pow(10, precision("tax_amount", last_tax))) {
 					me.grand_total_diff = diff;
+				} else {
+					me.grand_total_diff = 0;
 				}
 			}
 		}
@@ -626,10 +631,16 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 		// Changing sequence can cause rounding_adjustmentng issue and on-screen discrepency
 		const me = this;
 		const tax_count = this.frm.doc.taxes?.length;
-		const grand_total_diff = this.grand_total_diff || 0;
+		const grand_total_diff = this.grand_total_diff;
 
 		this.frm.doc.grand_total = flt(
 			tax_count ? this.frm.doc["taxes"][tax_count - 1].total + grand_total_diff : this.frm.doc.net_total
+		);
+
+		// total taxes and charges is calculated before adjusting base grand total
+		this.frm.doc.total_taxes_and_charges = flt(
+			this.frm.doc.grand_total - this.frm.doc.net_total - grand_total_diff,
+			precision("total_taxes_and_charges")
 		);
 
 		if (
@@ -673,11 +684,6 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 				"taxes_and_charges_deducted",
 			]);
 		}
-
-		this.frm.doc.total_taxes_and_charges = flt(
-			this.frm.doc.grand_total - this.frm.doc.net_total - grand_total_diff,
-			precision("total_taxes_and_charges")
-		);
 
 		this.set_in_company_currency(this.frm.doc, ["total_taxes_and_charges"]);
 
@@ -1101,7 +1107,7 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 			var payment_types = $.map(this.frm.doc.payments, function (d) {
 				return d.type;
 			});
-			if (in_list(payment_types, "Cash")) {
+			if (payment_types.includes("Cash")) {
 				var grand_total = this.frm.doc.rounded_total || this.frm.doc.grand_total;
 				var base_grand_total = this.frm.doc.base_rounded_total || this.frm.doc.base_grand_total;
 

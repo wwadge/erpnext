@@ -13,7 +13,6 @@ import erpnext
 from erpnext.assets.doctype.asset.asset import get_asset_value_after_depreciation
 from erpnext.assets.doctype.asset.depreciation import (
 	depreciate_asset,
-	get_disposal_account_and_cost_center,
 	get_gl_entries_on_asset_disposal,
 	get_value_after_depreciation_on_disposal_date,
 	reset_depreciation_schedule,
@@ -352,6 +351,7 @@ class AssetCapitalization(StockController):
 				"voucher_no": self.name,
 				"company": self.company,
 				"allow_zero_valuation": cint(item.get("allow_zero_valuation_rate")),
+				"serial_and_batch_bundle": item.serial_and_batch_bundle,
 			}
 		)
 
@@ -573,13 +573,19 @@ class AssetCapitalization(StockController):
 		if self.docstatus == 2:
 			net_purchase_amount = asset_doc.net_purchase_amount - total_target_asset_value
 			purchase_amount = asset_doc.purchase_amount - total_target_asset_value
-			asset_doc.db_set("total_asset_cost", asset_doc.total_asset_cost - total_target_asset_value)
+			total_asset_cost = asset_doc.total_asset_cost - total_target_asset_value
 		else:
 			net_purchase_amount = asset_doc.net_purchase_amount + total_target_asset_value
 			purchase_amount = asset_doc.purchase_amount + total_target_asset_value
+			total_asset_cost = asset_doc.total_asset_cost + total_target_asset_value
 
-		asset_doc.db_set("net_purchase_amount", net_purchase_amount)
-		asset_doc.db_set("purchase_amount", purchase_amount)
+		asset_doc.db_set(
+			{
+				"net_purchase_amount": net_purchase_amount,
+				"purchase_amount": purchase_amount,
+				"total_asset_cost": total_asset_cost,
+			}
+		)
 
 		frappe.msgprint(
 			_("Asset {0} has been updated. Please set the depreciation details if any and submit it.").format(
@@ -723,6 +729,7 @@ def get_consumed_stock_item_details(ctx: ItemDetailsCtx):
 				"company": ctx.company,
 				"serial_no": ctx.serial_no,
 				"batch_no": ctx.batch_no,
+				"serial_and_batch_bundle": ctx.serial_and_batch_bundle,
 			}
 		)
 		out.update(get_warehouse_details(incoming_rate_args))

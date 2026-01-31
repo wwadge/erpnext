@@ -39,6 +39,7 @@ class MaterialRequest(BuyingController):
 		from erpnext.stock.doctype.material_request_item.material_request_item import MaterialRequestItem
 
 		amended_from: DF.Link | None
+		auto_created_via_reorder: DF.Check
 		buying_price_list: DF.Link | None
 		company: DF.Link
 		customer: DF.Link | None
@@ -304,6 +305,9 @@ class MaterialRequest(BuyingController):
 				.groupby(doctype.material_request_item)
 			)
 
+			if self.material_request_type == "Manufacture":
+				query = query.where(doctype.status != "Closed")
+
 			mr_items_ordered_qty = frappe._dict(query.run())
 
 		return mr_items_ordered_qty
@@ -467,6 +471,7 @@ def get_list_context(context=None):
 			"show_search": True,
 			"no_breadcrumbs": True,
 			"title": _("Material Request"),
+			"list_template": "templates/includes/list/list.html",
 		}
 	)
 
@@ -841,7 +846,10 @@ def raise_work_orders(material_request, company):
 
 	for d in mr.items:
 		if (d.stock_qty - d.ordered_qty) > 0:
-			if frappe.db.exists("BOM", {"item": d.item_code, "is_default": 1}):
+			if frappe.db.exists("BOM", {"item": d.item_code, "is_default": 1, "is_active": 1}) or (
+				(variant_of := frappe.get_value("Item", d.item_code, "variant_of"))
+				and frappe.db.exists("BOM", {"item": variant_of, "is_default": 1, "is_active": 1})
+			):
 				wo_order = frappe.new_doc("Work Order")
 				wo_order.update(
 					{
@@ -903,11 +911,7 @@ def raise_work_orders(material_request, company):
 @frappe.whitelist()
 def create_pick_list(source_name, target_doc=None):
 	def update_item(obj, target, source_parent):
-		qty = (
-			flt(flt(obj.stock_qty) - flt(obj.ordered_qty)) / target.conversion_factor
-			if flt(obj.stock_qty) > flt(obj.ordered_qty)
-			else 0
-		)
+		qty = flt((obj.stock_qty - obj.picked_qty) / target.conversion_factor, obj.precision("qty"))
 		target.qty = qty
 		target.stock_qty = qty * obj.conversion_factor
 		target.conversion_factor = obj.conversion_factor
@@ -923,11 +927,15 @@ def create_pick_list(source_name, target_doc=None):
 			},
 			"Material Request Item": {
 				"doctype": "Pick List Item",
-				"field_map": {"name": "material_request_item", "stock_qty": "stock_qty"},
+				"field_map": {
+					"name": "material_request_item",
+					"stock_qty": "stock_qty",
+					"from_warehouse": "warehouse",
+				},
 				"postprocess": update_item,
 				"condition": lambda doc: (
-					flt(doc.ordered_qty, doc.precision("ordered_qty"))
-					< flt(doc.stock_qty, doc.precision("ordered_qty"))
+					flt(doc.picked_qty, doc.precision("picked_qty"))
+					< flt(doc.stock_qty, doc.precision("stock_qty"))
 				),
 			},
 		},

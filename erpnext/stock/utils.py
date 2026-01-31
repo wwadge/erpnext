@@ -6,7 +6,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.query_builder.functions import CombineDatetime, IfNull, Sum
+from frappe.query_builder.functions import IfNull, Sum
 from frappe.utils import cstr, flt, get_link_to_form, get_time, getdate, nowdate, nowtime
 
 import erpnext
@@ -331,34 +331,6 @@ def get_incoming_rate(args, raise_error_if_no_rate=True):
 	return flt(in_rate)
 
 
-def get_batch_incoming_rate(item_code, warehouse, batch_no, posting_date, posting_time, creation=None):
-	sle = frappe.qb.DocType("Stock Ledger Entry")
-
-	timestamp_condition = CombineDatetime(sle.posting_date, sle.posting_time) < CombineDatetime(
-		posting_date, posting_time
-	)
-	if creation:
-		timestamp_condition |= (
-			CombineDatetime(sle.posting_date, sle.posting_time) == CombineDatetime(posting_date, posting_time)
-		) & (sle.creation < creation)
-
-	batch_details = (
-		frappe.qb.from_(sle)
-		.select(Sum(sle.stock_value_difference).as_("batch_value"), Sum(sle.actual_qty).as_("batch_qty"))
-		.where(
-			(sle.item_code == item_code)
-			& (sle.warehouse == warehouse)
-			& (sle.batch_no == batch_no)
-			& (sle.serial_and_batch_bundle.isnull())
-			& (sle.is_cancelled == 0)
-		)
-		.where(timestamp_condition)
-	).run(as_dict=True)
-
-	if batch_details and batch_details[0].batch_qty:
-		return batch_details[0].batch_value / batch_details[0].batch_qty
-
-
 def get_avg_purchase_rate(serial_nos):
 	"""get average value of serial numbers"""
 
@@ -560,7 +532,7 @@ def is_reposting_item_valuation_in_progress():
 		)
 
 
-def check_pending_reposting(posting_date: str, throw_error: bool = True) -> bool:
+def check_pending_reposting(posting_date: str, company: str | None = None, throw_error: bool = True) -> bool:
 	"""Check if there are pending reposting job till the specified posting date."""
 
 	filters = {
@@ -568,6 +540,8 @@ def check_pending_reposting(posting_date: str, throw_error: bool = True) -> bool
 		"status": ["in", ["Queued", "In Progress"]],
 		"posting_date": ["<=", posting_date],
 	}
+	if company:
+		filters["company"] = company
 
 	reposting_pending = frappe.db.exists("Repost Item Valuation", filters)
 	if reposting_pending and throw_error:

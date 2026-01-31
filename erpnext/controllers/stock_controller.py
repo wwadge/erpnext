@@ -25,6 +25,7 @@ from erpnext.controllers.sales_and_purchase_return import (
 from erpnext.setup.doctype.brand.brand import get_brand_defaults
 from erpnext.setup.doctype.item_group.item_group import get_item_group_defaults
 from erpnext.stock import get_warehouse_account_map
+from erpnext.stock.doctype.batch.batch import get_batch_qty
 from erpnext.stock.doctype.inventory_dimension.inventory_dimension import (
 	get_evaluated_inventory_dimension,
 )
@@ -551,7 +552,10 @@ class StockController(AccountsController):
 		if is_rejected:
 			serial_nos = row.get("rejected_serial_no")
 			type_of_transaction = "Inward" if not self.is_return else "Outward"
-			qty = row.get("rejected_qty")
+			qty = flt(
+				row.get("rejected_qty") * row.get("conversion_factor", 1.0),
+				frappe.get_precision("Serial and Batch Entry", "qty"),
+			)
 			warehouse = row.get("rejected_warehouse")
 
 		if (
@@ -920,12 +924,22 @@ class StockController(AccountsController):
 						"Serial and Batch Bundle", row.serial_and_batch_bundle, {"is_cancelled": 1}
 					)
 
+					frappe.db.set_value(
+						"Serial and Batch Entry", {"parent": row.serial_and_batch_bundle}, {"is_cancelled": 1}
+					)
+
 				if update_values:
 					row.db_set(update_values)
 
 				if table_name == "items" and row.get("rejected_serial_and_batch_bundle"):
 					frappe.db.set_value(
 						"Serial and Batch Bundle", row.rejected_serial_and_batch_bundle, {"is_cancelled": 1}
+					)
+
+					frappe.db.set_value(
+						"Serial and Batch Entry",
+						{"parent": row.rejected_serial_and_batch_bundle},
+						{"is_cancelled": 1},
 					)
 
 					row.db_set("rejected_serial_and_batch_bundle", None)
@@ -1216,6 +1230,12 @@ class StockController(AccountsController):
 			],
 		}.get(self.doctype)
 
+		qty_field = {
+			"Sales Invoice": "qty",
+			"Delivery Note": "qty",
+			"Stock Entry": "fg_completed_qty",
+		}.get(self.doctype)
+
 		reserved_batches_data = self.get_reserved_batches(batches)
 		items = self.items
 		if self.doctype == "Stock Entry":
@@ -1234,6 +1254,17 @@ class StockController(AccountsController):
 						continue
 
 					if row.voucher_no == value:
+						continue
+
+					batch_qty = get_batch_qty(
+						row.batch_no,
+						row.warehouse,
+						posting_date=self.posting_date,
+						posting_time=self.posting_time,
+						consider_negative_batches=True,
+					)
+
+					if item.get(qty_field) < batch_qty:
 						continue
 
 					frappe.throw(
@@ -1264,6 +1295,7 @@ class StockController(AccountsController):
 				doctype.voucher_type,
 				doctype.voucher_no,
 				doctype.item_code,
+				doctype.warehouse,
 			)
 			.where((doctype.docstatus == 1) & (child_doc.batch_no.isin(batches)))
 		).run(as_dict=True)
@@ -1626,7 +1658,7 @@ class StockController(AccountsController):
 				rule = frappe.db.get_value(
 					"Putaway Rule",
 					{"item_code": item.get("item_code"), "warehouse": item.get(warehouse_field)},
-					["name", "disable"],
+					["stock_capacity", "name", "disable"],
 					as_dict=True,
 				)
 				if rule:
@@ -1645,7 +1677,11 @@ class StockController(AccountsController):
 						rule_map[rule_name]["warehouse"] = item.get(warehouse_field)
 						rule_map[rule_name]["item"] = item.get("item_code")
 						rule_map[rule_name]["qty_put"] = 0
-						rule_map[rule_name]["capacity"] = get_available_putaway_capacity(rule_name)
+						rule_map[rule_name]["capacity"] = (
+							rule.stock_capacity
+							if self.doctype == "Stock Reconciliation"
+							else get_available_putaway_capacity(rule_name)
+						)
 					rule_map[rule_name]["qty_put"] += flt(stock_qty)
 
 			for rule, values in rule_map.items():
@@ -2287,6 +2323,7 @@ def make_bundle_for_material_transfer(**kwargs):
 		row.voucher_no = bundle_doc.voucher_no
 		row.voucher_detail_no = bundle_doc.voucher_detail_no
 		row.type_of_transaction = bundle_doc.type_of_transaction
+		row.item_code = bundle_doc.item_code
 
 	bundle_doc.set_incoming_rate()
 	bundle_doc.calculate_qty_and_amount()

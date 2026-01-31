@@ -102,13 +102,24 @@ frappe.query_reports["Accounts Payable Summary"] = {
 			label: __("Revaluation Journals"),
 			fieldtype: "Check",
 		},
+		{
+			fieldname: "show_gl_balance",
+			label: __("Show GL Balance"),
+			fieldtype: "Check",
+		},
 	],
+	collapsible_filters: true,
+	separate_check_filters: true,
 
 	onload: function (report) {
 		report.page.add_inner_button(__("Accounts Payable"), function () {
 			var filters = report.get_values();
 			frappe.set_route("query-report", "Accounts Payable", { company: filters.company });
 		});
+
+		if (frappe.boot.sysdefaults.default_ageing_range) {
+			report.set_filter_value("range", frappe.boot.sysdefaults.default_ageing_range);
+		}
 	},
 };
 

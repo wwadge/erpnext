@@ -127,8 +127,6 @@ frappe.ui.form.on("Job Card", {
 	},
 
 	refresh: function (frm) {
-		frm.trigger("setup_stock_entry");
-
 		let has_items = frm.doc.items && frm.doc.items.length;
 		frm.trigger("make_fields_read_only");
 
@@ -196,6 +194,8 @@ frappe.ui.form.on("Job Card", {
 
 		frm.trigger("toggle_operation_number");
 
+		let is_timer_running = false;
+
 		if (
 			frm.doc.for_quantity + frm.doc.process_loss_qty > frm.doc.total_completed_qty &&
 			(frm.doc.skip_material_transfer ||
@@ -221,6 +221,10 @@ frappe.ui.form.on("Job Card", {
 								label: __("Select Employees"),
 								options: "Job Card Time Log",
 								fieldname: "employees",
+								reqd: 1,
+								filters: {
+									status: "Active",
+								},
 							},
 							(d) => {
 								frm.events.start_timer(frm, from_time, d.employees);
@@ -265,10 +269,16 @@ frappe.ui.form.on("Job Card", {
 					frm.add_custom_button(__("Complete Job"), () => {
 						frm.trigger("complete_job_card");
 					});
+
+					is_timer_running = true;
 				}
 
 				frm.trigger("make_dashboard");
 			}
+		}
+
+		if (!is_timer_running) {
+			frm.trigger("setup_stock_entry");
 		}
 
 		frm.trigger("setup_quality_inspection");

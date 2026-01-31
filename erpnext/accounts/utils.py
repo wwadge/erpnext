@@ -11,6 +11,7 @@ import frappe.defaults
 from frappe import _, qb, throw
 from frappe.desk.reportview import build_match_conditions
 from frappe.model.meta import get_field_precision
+from frappe.model.naming import determine_consecutive_week_number
 from frappe.query_builder import AliasedQuery, Case, Criterion, Field, Table
 from frappe.query_builder.functions import Count, IfNull, Max, Round, Sum
 from frappe.query_builder.utils import DocType
@@ -25,6 +26,7 @@ from frappe.utils import (
 	get_number_format_info,
 	getdate,
 	now,
+	now_datetime,
 	nowdate,
 )
 from frappe.utils.caching import site_cache
@@ -66,6 +68,7 @@ def get_fiscal_year(
 	as_dict=False,
 	boolean=None,
 	raise_on_missing=True,
+	truncate=False,
 ):
 	if isinstance(raise_on_missing, str):
 		raise_on_missing = loads(raise_on_missing)
@@ -79,7 +82,14 @@ def get_fiscal_year(
 	fiscal_years = get_fiscal_years(
 		date, fiscal_year, label, verbose, company, as_dict=as_dict, raise_on_missing=raise_on_missing
 	)
-	return False if not fiscal_years else fiscal_years[0]
+
+	if fiscal_years:
+		fiscal_year = fiscal_years[0]
+		if truncate:
+			return ("-".join(y[-2:] for y in fiscal_year[0].split("-")), fiscal_year[1], fiscal_year[2])
+		return fiscal_year
+
+	return False
 
 
 def get_fiscal_years(
@@ -199,6 +209,8 @@ def get_balance_on(
 	ignore_account_permission=False,
 	account_type=None,
 	start_date=None,
+	finance_book=None,
+	include_default_fb_balances=False,
 ):
 	if not account and frappe.form_dict.get("account"):
 		account = frappe.form_dict.get("account")
@@ -293,8 +305,31 @@ def get_balance_on(
 			f"""gle.party_type = {frappe.db.escape(party_type)} and gle.party = {frappe.db.escape(party)} """
 		)
 
+	default_finance_book = None
 	if company:
 		cond.append("""gle.company = %s """ % (frappe.db.escape(company)))
+		default_finance_book = frappe.get_cached_value("Company", company, "default_finance_book")
+
+	if finance_book:
+		if default_finance_book and include_default_fb_balances:
+			cond.append(
+				f"""(gle.finance_book IN (
+						{frappe.db.escape(finance_book)},
+						{frappe.db.escape(default_finance_book)}
+					) OR gle.finance_book IS NULL
+				)"""
+			)
+		else:
+			cond.append(f"(gle.finance_book = {frappe.db.escape(finance_book)} OR gle.finance_book IS NULL)")
+
+	elif default_finance_book and include_default_fb_balances:
+		# No finance book passed → fall back to default
+		cond.append(
+			f"""(
+				gle.finance_book = {frappe.db.escape(default_finance_book)}
+				OR gle.finance_book IS NULL
+			)"""
+		)
 
 	if account or (party_type and party) or account_type:
 		precision = get_currency_precision()
@@ -522,6 +557,7 @@ def reconcile_against_document(
 				doc.make_advance_gl_entries(entry=row)
 		else:
 			_delete_pl_entries(voucher_type, voucher_no)
+			_delete_adv_pl_entries(voucher_type, voucher_no)
 			gl_map = doc.build_gl_map()
 			# Make sure there is no overallocation
 			from erpnext.accounts.general_ledger import process_debit_credit_difference
@@ -637,6 +673,7 @@ def update_reference_in_journal_entry(d, journal_entry, do_not_save=False):
 		d["allocated_amount"] = d["allocated_amount"] * -1
 		d["unadjusted_amount"] = d["unadjusted_amount"] * -1
 
+	insert_position = -1
 	if flt(d["unadjusted_amount"]) - flt(d["allocated_amount"]) != 0:
 		# adjust the unreconciled balance
 		amount_in_account_currency = flt(d["unadjusted_amount"]) - flt(d["allocated_amount"])
@@ -648,9 +685,10 @@ def update_reference_in_journal_entry(d, journal_entry, do_not_save=False):
 		)
 	else:
 		journal_entry.remove(jv_detail)
+		insert_position += jv_detail.idx
 
 	# new row with references
-	new_row = journal_entry.append("accounts")
+	new_row = journal_entry.append("accounts", position=insert_position)
 
 	# Copy field values into new row
 	[
@@ -1121,7 +1159,7 @@ def get_company_default(company, fieldname, ignore_validation=False):
 	if not ignore_validation and not value:
 		throw(
 			_("Please set default {0} in Company {1}").format(
-				frappe.get_meta("Company").get_label(fieldname), company
+				_(frappe.get_meta("Company").get_label(fieldname)), company
 			)
 		)
 
@@ -1333,7 +1371,7 @@ def get_children(doctype, parent, company, is_root=False, include_disabled=False
 
 
 @frappe.whitelist()
-def get_account_balances(accounts, company):
+def get_account_balances(accounts, company, finance_book=None, include_default_fb_balances=False):
 	if isinstance(accounts, str):
 		accounts = loads(accounts)
 
@@ -1344,9 +1382,25 @@ def get_account_balances(accounts, company):
 
 	for account in accounts:
 		account["company_currency"] = company_currency
-		account["balance"] = flt(get_balance_on(account["value"], in_account_currency=False, company=company))
+		account["balance"] = flt(
+			get_balance_on(
+				account=account["value"],
+				in_account_currency=False,
+				company=company,
+				finance_book=finance_book,
+				include_default_fb_balances=include_default_fb_balances,
+			)
+		)
+
 		if account["account_currency"] and account["account_currency"] != company_currency:
-			account["balance_in_account_currency"] = flt(get_balance_on(account["value"], company=company))
+			account["balance_in_account_currency"] = flt(
+				get_balance_on(
+					account=account["value"],
+					company=company,
+					finance_book=finance_book,
+					include_default_fb_balances=include_default_fb_balances,
+				)
+			)
 
 	return accounts
 
@@ -1459,14 +1513,14 @@ def get_autoname_with_number(number_value, doc_title, company):
 
 
 def parse_naming_series_variable(doc, variable):
-	if variable == "FY":
+	if variable in ["FY", "TFY"]:
 		if doc:
 			date = doc.get("posting_date") or doc.get("transaction_date") or getdate()
 			company = doc.get("company")
 		else:
 			date = getdate()
 			company = None
-		return get_fiscal_year(date=date, company=company)[0]
+		return get_fiscal_year(date=date, company=company, truncate=variable == "TFY")[0]
 
 	elif variable == "ABBR":
 		if doc:
@@ -1475,6 +1529,18 @@ def parse_naming_series_variable(doc, variable):
 			company = frappe.db.get_default("company")
 
 		return frappe.db.get_value("Company", company, "abbr") if company else ""
+
+	else:
+		data = {"YY": "%y", "YYYY": "%Y", "MM": "%m", "DD": "%d", "JJJ": "%j"}
+		date = (
+			(
+				getdate(doc.get("posting_date") or doc.get("transaction_date") or doc.get("posting_datetime"))
+				or now_datetime()
+			)
+			if frappe.get_single_value("Global Defaults", "use_posting_datetime_for_naming_documents")
+			else now_datetime()
+		)
+		return date.strftime(data[variable]) if variable in data else determine_consecutive_week_number(date)
 
 
 @frappe.whitelist()
@@ -1905,6 +1971,7 @@ def get_payment_ledger_entries(gl_entries, cancel=0):
 					account=gle.account,
 					party_type=gle.party_type,
 					party=gle.party,
+					project=gle.project,
 					cost_center=gle.cost_center,
 					finance_book=gle.finance_book,
 					due_date=gle.due_date,
